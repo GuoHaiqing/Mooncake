@@ -599,6 +599,7 @@ The Transfer Engine respects the following environment variables:
 - `MC_CUSTOM_TOPO_JSON`: Path to custom topology JSON file
 - `MC_TE_METRIC`: Enables metrics reporting (set to "1", "true", "yes", or "on"). **Note:** Not supported when using Transfer Engine TENT.
 - `MC_TE_METRIC_INTERVAL_SECONDS`: Sets metrics reporting interval in seconds
+- `MC_TRANSFER_ON_CUDA_SLOW_BW_GBPS`: Warns (via `LOG(WARNING)`) when the effective bandwidth of a CUDA-stream-triggered transfer (the `transfer_*_on_cuda` / `batch_transfer_*_on_cuda` APIs) falls below this many Gb/s. Bandwidth is measured over wire time only (after `submitTransfer` returns). `0` or unset disables the warning (default: unset).
 
 ## Usage Examples
 

@@ -35,6 +35,7 @@
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
+#include <nvtx3/nvToolsExt.h>
 #endif
 
 static void* (*allocateMemory)(size_t) = nullptr;
@@ -100,6 +101,14 @@ TransferEnginePy::TransferEnginePy() {
         transfer_timeout_nsec_ = timeout_sec * kNanosPerSecond;
     } else {
         transfer_timeout_nsec_ = 30 * kNanosPerSecond;
+    }
+    // MC_TRANSFER_ON_CUDA_SLOW_BW_GBPS: warn when the effective bandwidth of a
+    // CUDA-stream-triggered transfer falls below this many Gb/s. 0 disables.
+    if (getenv("MC_TRANSFER_ON_CUDA_SLOW_BW_GBPS")) {
+        transfer_slow_threshold_gbps_ = std::max(
+            0.0, atof(getenv("MC_TRANSFER_ON_CUDA_SLOW_BW_GBPS")));
+    } else {
+        transfer_slow_threshold_gbps_ = 0.0;
     }
 }
 
@@ -776,6 +785,9 @@ struct TransferOnCudaContext {
     Transport::BatchID batch_id;
     std::vector<Transport::TransferRequest> requests;
     uint64_t total_bytes;
+    bool is_write;
+    std::string target_hostname;
+    double slow_threshold_gbps;
 };
 
 /**
@@ -790,12 +802,28 @@ struct TransferOnCudaContext {
 void CUDART_CB transfer_on_cuda_callback(void* data) {
     auto* ctx = reinterpret_cast<TransferOnCudaContext*>(data);
 
+    nvtxEventAttributes_t attr = {};
+    attr.version = NVTX_VERSION;
+    attr.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    attr.colorType = NVTX_COLOR_ARGB;
+    attr.color = ctx->is_write ? 0xFF00FF00 : 0xFFFF0000;
+    attr.messageType = NVTX_MESSAGE_TYPE_ASCII;
+    attr.message.ascii = ctx->is_write ? "MooncakeTransfer::Write"
+                                       : "MooncakeTransfer::Read";
+    attr.payloadType = NVTX_PAYLOAD_TYPE_UNSIGNED_INT64;
+    attr.payload.ullValue = ctx->total_bytes;
+    nvtxRangePushEx(&attr);
+
+    const uint64_t start_ts = getCurrentTimeInNano();
+    uint64_t submit_done_ts = 0;
+
     auto status = ctx->engine->submitTransfer(ctx->batch_id, ctx->requests);
     if (!status.ok()) {
         LOG(ERROR) << "[Mooncake Cuda] Submit failed: " << status.ToString()
                    << " | BatchID: " << ctx->batch_id;
         goto error_exit;
     }
+    submit_done_ts = getCurrentTimeInNano();
 
     Transport::TransferStatus t_status;
     while (true) {
@@ -819,11 +847,36 @@ void CUDART_CB transfer_on_cuda_callback(void* data) {
         }
     }
 
+    if (ctx->slow_threshold_gbps > 0.0 && ctx->total_bytes > 0) {
+        const uint64_t end_ts = getCurrentTimeInNano();
+        const uint64_t wait_ns = end_ts - submit_done_ts;
+        // Bandwidth reflects wire time only — submit is CPU-side enqueue.
+        const double bw_gbps =
+            wait_ns > 0
+                ? (ctx->total_bytes * 8.0) / (wait_ns / 1.0e9) / 1e9
+                : 0.0;
+        if (wait_ns > 0 && bw_gbps < ctx->slow_threshold_gbps) {
+            const uint64_t total_ns = end_ts - start_ts;
+            const uint64_t submit_ns = submit_done_ts - start_ts;
+            LOG(WARNING) << "[Mooncake Cuda] Slow "
+                         << (ctx->is_write ? "write" : "read")
+                         << " | target=" << ctx->target_hostname
+                         << " batch_id=" << ctx->batch_id
+                         << " bytes=" << ctx->total_bytes
+                         << " total_ms=" << total_ns / 1e6
+                         << " submit_ms=" << submit_ns / 1e6
+                         << " wait_ms=" << wait_ns / 1e6
+                         << " bw_gbps=" << bw_gbps;
+        }
+    }
+
     ctx->engine->freeBatchID(ctx->batch_id);
     delete ctx;
+    nvtxRangePop();
     return;
 
 error_exit:
+    nvtxRangePop();
     // Since this is a CUDA host callback running in a driver thread,
     // we cannot propagate exceptions or error codes back to the main
     // application. A failure here implies the data transfer required for
@@ -891,8 +944,13 @@ void TransferEnginePy::batchTransferOnCuda(
     }
 
     auto batch_id = engine_->allocateBatchID(batch_size);
-    auto* ctx = new TransferOnCudaContext{engine_, batch_id, std::move(entries),
-                                          total_bytes};
+    auto* ctx = new TransferOnCudaContext{engine_,
+                                          batch_id,
+                                          std::move(entries),
+                                          total_bytes,
+                                          opcode == TransferOpcode::WRITE,
+                                          target_hostname,
+                                          transfer_slow_threshold_gbps_};
 
     cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
     cudaError_t err =
