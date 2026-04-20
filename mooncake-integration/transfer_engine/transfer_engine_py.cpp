@@ -105,8 +105,8 @@ TransferEnginePy::TransferEnginePy() {
     // MC_TRANSFER_ON_CUDA_SLOW_BW_GBPS: warn when the effective bandwidth of a
     // CUDA-stream-triggered transfer falls below this many Gb/s. 0 disables.
     if (getenv("MC_TRANSFER_ON_CUDA_SLOW_BW_GBPS")) {
-        transfer_slow_threshold_gbps_ = std::max(
-            0.0, atof(getenv("MC_TRANSFER_ON_CUDA_SLOW_BW_GBPS")));
+        transfer_slow_threshold_gbps_ =
+            std::max(0.0, atof(getenv("MC_TRANSFER_ON_CUDA_SLOW_BW_GBPS")));
     } else {
         transfer_slow_threshold_gbps_ = 0.0;
     }
@@ -808,8 +808,8 @@ void CUDART_CB transfer_on_cuda_callback(void* data) {
     attr.colorType = NVTX_COLOR_ARGB;
     attr.color = ctx->is_write ? 0xFF00FF00 : 0xFFFF0000;
     attr.messageType = NVTX_MESSAGE_TYPE_ASCII;
-    attr.message.ascii = ctx->is_write ? "MooncakeTransfer::Write"
-                                       : "MooncakeTransfer::Read";
+    attr.message.ascii =
+        ctx->is_write ? "MooncakeTransfer::Write" : "MooncakeTransfer::Read";
     attr.payloadType = NVTX_PAYLOAD_TYPE_UNSIGNED_INT64;
     attr.payload.ullValue = ctx->total_bytes;
     nvtxRangePushEx(&attr);
@@ -852,9 +852,8 @@ void CUDART_CB transfer_on_cuda_callback(void* data) {
         const uint64_t wait_ns = end_ts - submit_done_ts;
         // Bandwidth reflects wire time only — submit is CPU-side enqueue.
         const double bw_gbps =
-            wait_ns > 0
-                ? (ctx->total_bytes * 8.0) / (wait_ns / 1.0e9) / 1e9
-                : 0.0;
+            wait_ns > 0 ? (ctx->total_bytes * 8.0) / (wait_ns / 1.0e9) / 1e9
+                        : 0.0;
         if (wait_ns > 0 && bw_gbps < ctx->slow_threshold_gbps) {
             const uint64_t total_ns = end_ts - start_ts;
             const uint64_t submit_ns = submit_done_ts - start_ts;
